@@ -1,0 +1,12 @@
+aiohttp>=3.9
+pandas>=2.2
+numpy>=1.26
+scikit-learn>=1.5
+xgboost>=2.0
+transformers>=4.41
+tensorflow>=2.15
+praw>=7.7
+pytrends>=4.9
+python-telegram-bot>=20.6
+yfinance>=0.2.40
+python-dotenv>=1.0.1
