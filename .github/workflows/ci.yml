@@ -5,6 +5,29 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
+  # מאפשר הרצה ידנית מה-Actions tab
+  workflow_dispatch:
+    inputs:
+      run_tests:
+        description: "Run Python install + import smoke test"
+        type: boolean
+        required: true
+        default: true
+      build_docker:
+        description: "Build Docker image (no push)"
+        type: boolean
+        required: true
+        default: true
+      push_to_ghcr:
+        description: "Also push image to GHCR (requires permissions)"
+        type: boolean
+        required: false
+        default: false
+      image_tag:
+        description: "Tag to use when pushing to GHCR (e.g. manual-2025-08-21)"
+        type: string
+        required: false
+        default: ""
 
 jobs:
   build-test:
@@ -31,11 +54,13 @@ jobs:
             ${{ runner.os }}-pip-
 
       - name: Install deps
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
       - name: Static smoke test (import only)
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
         run: |
           python - << 'PY'
           import importlib.util
@@ -46,12 +71,14 @@ jobs:
           PY
 
       - name: Build Docker image
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_docker }}
         uses: docker/build-push-action@v6
         with:
           context: .
           push: false
           tags: penny-bot:ci
 
+  # שחרור אוטומטי כשדוחפים tag (כמו קודם)
   release-image:
     if: startsWith(github.ref, 'refs/tags/')
     needs: build-test
@@ -70,9 +97,44 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build & Push
+      - name: Build & Push (tag-based)
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: ghcr.io/${{ github.repository_owner }}/penny-bot:${{ github.ref_name }}
+
+  # פוש ידני ל-GHCR דרך workflow_dispatch (ללא tag)
+  manual-push-image:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.push_to_ghcr }}
+    needs: build-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Derive tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.image_tag }}" ]; then
+            echo "TAG=${{ inputs.image_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "TAG=manual-${GITHUB_RUN_NUMBER}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & Push (manual)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/penny-bot:${{ steps.tag.outputs.TAG }}
