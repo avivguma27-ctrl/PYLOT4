@@ -22,37 +22,35 @@ from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 
 import yfinance as yf
-from dotenv import load_dotenv
 from telegram import Bot
 
 # ============================== #
-#         Load .env & Config     #
+#         קונפיג קשיח (עם טוקנים) #
 # ============================== #
-load_dotenv()
 
-DB_FILE = os.getenv("DB_FILE", "penny_stocks.db")
-LOG_FILE = os.getenv("LOG_FILE", "bot.log")
-OUTPUT_FILE = os.getenv("OUTPUT_FILE", "top_stocks.csv")
+DB_FILE = "penny_stocks.db"
+LOG_FILE = "bot.log"
+OUTPUT_FILE = "top_stocks.csv"
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-CHAT_ID = os.getenv("CHAT_ID", "")
-FMP_API_KEY = os.getenv("FMP_API_KEY", "")
-REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID", "")
-REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET", "")
-REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", "_bot_v1")
+# 🔑 מפתחות / טוקנים (כפי שנתת)
+TELEGRAM_TOKEN = "8453354058:AAGG0v0zLWTe1NJE7ttfaUZvoutf5XNGU7s"
+CHAT_ID = "6387878532"
+FMP_API_KEY = "5nhxZGIiFnjG8JxcdSKljx0eZRuqwELX"
+REDDIT_CLIENT_ID = "ZOa0YjqoW-H_-aFXhIXrLw"
+REDDIT_CLIENT_SECRET = "7v6s4PJr2kdbvtfNDq7khltKXVkCrw"
+REDDIT_USER_AGENT = "_bot_v1"
 
-GAIN_THRESHOLD = float(os.getenv("GAIN_THRESHOLD", 0.05))
-RSI_COLD_THRESHOLD = float(os.getenv("RSI_COLD_THRESHOLD", 40))
-VOLUME_THRESHOLD = int(os.getenv("VOLUME_THRESHOLD", 500_000))
-MARKET_CAP_THRESHOLD = int(os.getenv("MARKET_CAP_THRESHOLD", 50_000_000))
-FLOAT_THRESHOLD = int(os.getenv("FLOAT_THRESHOLD", 50_000_000))
-MAX_API_RETRIES = int(os.getenv("MAX_API_RETRIES", 3))
-RETRY_DELAY = int(os.getenv("RETRY_DELAY", 15))
-MAX_TICKERS = int(os.getenv("MAX_TICKERS", 10))
-RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", 60))
-LOOKBACK = int(os.getenv("LOOKBACK", 30))
-
-# Concurrency limit for network tasks
+# ספים ובקרים
+GAIN_THRESHOLD = 0.05
+RSI_COLD_THRESHOLD = 40
+VOLUME_THRESHOLD = 500_000
+MARKET_CAP_THRESHOLD = 50_000_000
+FLOAT_THRESHOLD = 50_000_000
+MAX_API_RETRIES = 3
+RETRY_DELAY = 15
+MAX_TICKERS = 10
+RATE_LIMIT_PER_MINUTE = 60
+LOOKBACK = 30
 MAX_CONCURRENT_REQUESTS = 5
 
 # ============================== #
@@ -60,7 +58,7 @@ MAX_CONCURRENT_REQUESTS = 5
 # ============================== #
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s)",
+    format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()]
 )
 
@@ -114,12 +112,9 @@ def log_error(msg: str):
         logging.error(f"DB log_error failed: {e}")
 
 async def send_telegram(msg: str):
-    """Send message with retries (no recursion)."""
+    """שליחת הודעה לטלגרם עם נסיונות חוזרים (בלי רקורסיה)."""
     for attempt in range(MAX_API_RETRIES):
         try:
-            if not TELEGRAM_TOKEN or not CHAT_ID:
-                logging.warning("Telegram credentials missing; skipping message.")
-                return
             await bot.send_message(chat_id=CHAT_ID, text=msg)
             return
         except Exception as e:
@@ -165,7 +160,6 @@ def build_lstm_model(input_shape: Tuple[int, int]) -> Sequential:
 #      Google Trends + Reddit     #
 # ============================== #
 _sentiment_analyzer = None
-
 def get_sentiment_analyzer():
     global _sentiment_analyzer
     if _sentiment_analyzer is None:
@@ -193,8 +187,6 @@ async def get_google_trends(ticker: str) -> float:
 async def analyze_reddit_sentiment(ticker: str) -> float:
     for attempt in range(MAX_API_RETRIES):
         try:
-            if not (REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET and REDDIT_USER_AGENT):
-                return 0.0
             reddit = praw.Reddit(
                 client_id=REDDIT_CLIENT_ID,
                 client_secret=REDDIT_CLIENT_SECRET,
@@ -221,8 +213,6 @@ async def analyze_reddit_sentiment(ticker: str) -> float:
 #         FMP / Tickers          #
 # ============================== #
 async def check_fmp_api() -> bool:
-    if not FMP_API_KEY:
-        return False
     try:
         async with aiohttp.ClientSession() as session:
             url = f"https://financialmodelingprep.com/api/v3/quote/AAPL?apikey={FMP_API_KEY}"
@@ -240,8 +230,6 @@ async def fetch_tickers() -> List[str]:
 
     async with aiohttp.ClientSession(headers=headers) as session:
         async def _try_fmp_list():
-            if not FMP_API_KEY:
-                return []
             try:
                 url = f"https://financialmodelingprep.com/api/v3/stock/list?apikey={FMP_API_KEY}"
                 async with session.get(url, timeout=30) as response:
@@ -265,8 +253,6 @@ async def fetch_tickers() -> List[str]:
                 return []
 
         async def _try_fmp_actives():
-            if not FMP_API_KEY:
-                return []
             try:
                 url = f"https://financialmodelingprep.com/api/v3/stock/actives?apikey={FMP_API_KEY}"
                 async with session.get(url, timeout=30) as response:
@@ -297,7 +283,7 @@ async def fetch_tickers() -> List[str]:
                 lst = await _try_fmp_actives()
             tickers.extend(lst)
         else:
-            log_error("FMP API unavailable or key missing; using fallback list")
+            log_error("FMP API unavailable; using fallback list")
 
         if len(tickers) < 5:
             fallback_tickers = ['AACG','AAOI','AAME','AATC','ABAT','ABCB','ABSI','ABVC','ACAD','ACET']
@@ -358,12 +344,12 @@ async def analyze_ticker(ticker: str) -> Optional[Dict[str, Any]]:
 async def analyze_ticker_inner(ticker: str, session: aiohttp.ClientSession) -> Optional[Dict[str, Any]]:
     try:
         # Historical prices (FMP → fallback yfinance)
-        data = {}
-        if FMP_API_KEY:
-            url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{ticker}?timeseries=400&apikey={FMP_API_KEY}"
-            async with session.get(url, timeout=30) as response:
-                if response.status == 200:
-                    data = await response.json()
+        url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{ticker}?timeseries=400&apikey={FMP_API_KEY}"
+        async with session.get(url, timeout=30) as response:
+            if response.status == 200:
+                data = await response.json()
+            else:
+                data = {}
 
         if data.get('historical'):
             df = pd.DataFrame(data['historical'])
@@ -382,15 +368,14 @@ async def analyze_ticker_inner(ticker: str, session: aiohttp.ClientSession) -> O
             return None
 
         # Fundamentals / profile
-        info = {}
-        if FMP_API_KEY:
-            url_info = f"https://financialmodelingprep.com/api/v3/profile/{ticker}?apikey={FMP_API_KEY}"
-            try:
-                async with session.get(url_info, timeout=20) as response:
-                    info_data = await response.json()
-                    info = info_data[0] if info_data else {}
-            except Exception as e:
-                log_error(f"Profile fetch failed for {ticker}: {e}")
+        url_info = f"https://financialmodelingprep.com/api/v3/profile/{ticker}?apikey={FMP_API_KEY}"
+        try:
+            async with session.get(url_info, timeout=20) as response:
+                info_data = await response.json()
+                info = info_data[0] if info_data else {}
+        except Exception as e:
+            log_error(f"Profile fetch failed for {ticker}: {e}")
+            info = {}
 
         # VIX (yfinance)
         vix_df = None
@@ -504,7 +489,7 @@ async def analyze_ticker_inner(ticker: str, session: aiohttp.ClientSession) -> O
         except Exception:
             fi = []
 
-        return {
+        out = {
             'ticker': ticker,
             'current_price': current_price,
             'predicted_price': float(predicted_price),
@@ -518,6 +503,7 @@ async def analyze_ticker_inner(ticker: str, session: aiohttp.ClientSession) -> O
             'short_interest': float(info.get('shortPercentOfFloat', 0) or 0),
             'feature_importance': str(fi),
         }
+        return out
 
     except Exception as e:
         shape = 'empty'
@@ -553,10 +539,13 @@ async def scan_stocks() -> List[Dict[str, Any]]:
             if analysis['predicted_gain'] > GAIN_THRESHOLD:
                 results.append(analysis)
 
+        # Persist & notify
         if results:
             df_results = pd.DataFrame(results)
+            # CSV
             df_results.to_csv(OUTPUT_FILE, index=False)
 
+            # DB inserts
             with sqlite3.connect(DB_FILE) as conn:
                 cursor = conn.cursor()
                 for row in results:
@@ -578,6 +567,7 @@ async def scan_stocks() -> List[Dict[str, Any]]:
                         log_error(f"DB insert failed for {row['ticker']}: {e}")
                 conn.commit()
 
+            # Telegram message
             msg_lines = [f"📊 נמצאו {len(results)} מניות מבטיחות:"]
             for row in results:
                 msg_lines.append(
