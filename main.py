@@ -31,6 +31,7 @@ from telegram import Bot
 DB_FILE = "penny_stocks.db"
 LOG_FILE = "bot.log"
 OUTPUT_FILE = "top_stocks.csv"
+MANUAL_TICKERS_FILE = "manual_tickers.txt"  # קובץ נפרד לטיקרים
 
 # 🔑 מפתחות / טוקנים (כפי שנתת)
 TELEGRAM_TOKEN = "8453354058:AAGG0v0zLWTe1NJE7ttfaUZvoutf5XNGU7s"
@@ -163,10 +164,20 @@ _sentiment_analyzer = None
 def get_sentiment_analyzer():
     global _sentiment_analyzer
     if _sentiment_analyzer is None:
-        _sentiment_analyzer = pipeline(
-            'sentiment-analysis',
-            model='distilbert-base-uncased-finetuned-sst-2-english'
-        )
+        try:
+            _sentiment_analyzer = pipeline(
+                'sentiment-analysis',
+                model='distilbert-base-uncased-finetuned-sst-2-english'
+            )
+        except Exception as e:
+            log_error(f"Failed to initialize sentiment analyzer: {e}")
+            # Fallback to a simple analyzer
+            class SimpleAnalyzer:
+                def __call__(self, texts):
+                    if isinstance(texts, str):
+                        texts = [texts]
+                    return [{'label': 'POSITIVE', 'score': 0.5} for _ in texts]
+            _sentiment_analyzer = SimpleAnalyzer()
     return _sentiment_analyzer
 
 async def get_google_trends(ticker: str) -> float:
@@ -195,13 +206,23 @@ async def analyze_reddit_sentiment(ticker: str) -> float:
             analyzer = get_sentiment_analyzer()
             sentiment = 0.0
             count = 0
-            for post in reddit.subreddit("wallstreetbets+pennystocks").search(ticker, limit=5):
-                text = (post.title or '') + ' ' + (getattr(post, 'selftext', '') or '')
-                res = analyzer(text[:512])[0]
-                score = float(res['score']) if res['label'] == 'POSITIVE' else -float(res['score'])
-                sentiment += score
-                count += 1
-                await asyncio.sleep(60 / RATE_LIMIT_PER_MINUTE)
+            
+            # Try multiple subreddits
+            subreddits = ["wallstreetbets", "pennystocks", "stocks", "investing"]
+            for subreddit in subreddits:
+                try:
+                    for post in reddit.subreddit(subreddit).search(ticker, limit=3):
+                        text = (post.title or '') + ' ' + (getattr(post, 'selftext', '') or '')
+                        if len(text) > 10:  # Only analyze if there's meaningful text
+                            res = analyzer(text[:512])[0]
+                            score = float(res['score']) if res['label'] == 'POSITIVE' else -float(res['score'])
+                            sentiment += score
+                            count += 1
+                        await asyncio.sleep(60 / RATE_LIMIT_PER_MINUTE)
+                except Exception as e:
+                    log_error(f"Reddit search error in {subreddit} for {ticker}: {e}")
+                    continue
+                    
             return sentiment / count if count > 0 else 0.0
         except Exception as e:
             log_error(f"Reddit sentiment error for {ticker} (attempt {attempt + 1}): {e}")
@@ -225,6 +246,7 @@ async def check_fmp_api() -> bool:
         return False
 
 async def fetch_tickers() -> List[str]:
+    """Fetch tickers automatically from FMP API"""
     tickers: List[str] = []
     headers = {'User-Agent': 'Mozilla/5.0'}
 
@@ -236,15 +258,21 @@ async def fetch_tickers() -> List[str]:
                     response.raise_for_status()
                     data = await response.json()
                 df = pd.DataFrame(data)
-                needed_cols = {'symbol', 'price', 'exchangeShortName'}
-                if not needed_cols.issubset(df.columns):
-                    raise ValueError("FMP list missing required columns")
-                vol_col = next((c for c in ['volume', 'avgVolume', 'averageVolume'] if c in df.columns), None)
-                if not vol_col:
-                    raise ValueError("No volume column in FMP list")
-                df = df.dropna(subset=['symbol', 'price', vol_col, 'exchangeShortName'])
+                
+                # Check for volume column with different possible names
+                vol_cols = ['volume', 'avgVolume', 'averageVolume']
+                found_vol_col = None
+                for col in vol_cols:
+                    if col in df.columns:
+                        found_vol_col = col
+                        break
+                
+                if not found_vol_col:
+                    raise ValueError("No volume column found in FMP response")
+                
+                df = df.dropna(subset=['symbol', 'price', found_vol_col, 'exchangeShortName'])
                 df = df[(df['price'] <= 5.0) &
-                        (df[vol_col] >= VOLUME_THRESHOLD) &
+                        (df[found_vol_col] >= VOLUME_THRESHOLD) &
                         (df['exchangeShortName'].isin(['NASDAQ', 'NYSE'])) &
                         (~df['symbol'].str.contains('-WS|-U|-R|-P-', na=False))]
                 return df['symbol'].astype(str).tolist()
@@ -271,7 +299,7 @@ async def fetch_tickers() -> List[str]:
                 df = df[(df['price'] <= 5.0) & (df['volume'] >= VOLUME_THRESHOLD) &
                         (df['exchange'].str.contains('NAS|NY', na=False)) &
                         (~df['symbol'].str.contains('-WS|-U|-R|-P-', na=False))]
-                return df['symbol'].astype(str).tolist()
+                return df['symbol'].astize(str).tolist()
             except Exception as e:
                 log_error(f"FMP actives fetch error: {e}")
                 return []
@@ -293,6 +321,30 @@ async def fetch_tickers() -> List[str]:
 
     logging.info(f"Fetched {len(tickers)} tickers: {tickers}")
     return tickers
+
+def get_manual_tickers() -> List[str]:
+    """Get tickers from manual input file ONLY"""
+    if not os.path.exists(MANUAL_TICKERS_FILE):
+        error_msg = f"Manual tickers file '{MANUAL_TICKERS_FILE}' not found. Please create this file with one ticker per line."
+        logging.error(error_msg)
+        raise FileNotFoundError(error_msg)
+    
+    try:
+        with open(MANUAL_TICKERS_FILE, 'r') as f:
+            tickers = [line.strip().upper() for line in f.readlines() if line.strip() and not line.strip().startswith('#')]
+        
+        if not tickers:
+            error_msg = f"Manual tickers file '{MANUAL_TICKERS_FILE}' is empty. Please add tickers (one per line)."
+            logging.error(error_msg)
+            raise ValueError(error_msg)
+            
+        logging.info(f"Loaded {len(tickers)} tickers from manual file: {tickers}")
+        return tickers
+        
+    except Exception as e:
+        error_msg = f"Error reading manual tickers file: {e}"
+        logging.error(error_msg)
+        raise
 
 # ============================== #
 #        Feature Engineering     #
@@ -357,11 +409,16 @@ async def analyze_ticker_inner(ticker: str, session: aiohttp.ClientSession) -> O
             df['Date'] = pd.to_datetime(df['Date'])
             df = df.set_index('Date').sort_index()
         else:
-            df = yf.download(ticker, period="2y", interval="1d", progress=False)
-            if df.empty:
-                log_error(f"No historical data for {ticker}")
+            # Fallback to yfinance
+            try:
+                df = yf.download(ticker, period="2y", interval="1d", progress=False, auto_adjust=True)
+                if df.empty:
+                    log_error(f"No historical data for {ticker}")
+                    return None
+                df = df.rename(columns=str.title)
+            except Exception as e:
+                log_error(f"YFinance download failed for {ticker}: {e}")
                 return None
-            df = df.rename(columns=str.title)
 
         if len(df) < 120:
             log_error(f"Insufficient data for {ticker} ({len(df)} rows)")
@@ -377,18 +434,18 @@ async def analyze_ticker_inner(ticker: str, session: aiohttp.ClientSession) -> O
             log_error(f"Profile fetch failed for {ticker}: {e}")
             info = {}
 
-        # VIX (yfinance)
+        # VIX (yfinance) - with error handling for version issues
         vix_df = None
-        for attempt in range(MAX_API_RETRIES):
+        try:
+            # Try with the new parameter format first
+            vix_df = yf.download("^VIX", period="2y", interval="1d", progress=False, auto_adjust=True)
+        except Exception as e:
+            log_error(f"VIX download failed with new format: {e}")
             try:
+                # Fallback to old format
                 vix_df = yf.download("^VIX", period="2y", interval="1d", progress=False)
-                if not vix_df.empty:
-                    break
-                await asyncio.sleep(RETRY_DELAY)
-            except Exception as e:
-                log_error(f"VIX fetch error for {ticker} (attempt {attempt+1}): {e}")
-                if attempt < MAX_API_RETRIES - 1:
-                    await asyncio.sleep(RETRY_DELAY)
+            except Exception as e2:
+                log_error(f"VIX download also failed with old format: {e2}")
 
         # External signals
         google_trend = await get_google_trends(ticker)
@@ -418,7 +475,8 @@ async def analyze_ticker_inner(ticker: str, session: aiohttp.ClientSession) -> O
             y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
             base_model.fit(X_train, y_train)
             y_pred = base_model.predict(X_test)
-            rmse = mean_squared_error(y_test, y_pred, squared=False)
+            # Use the older method for compatibility
+            rmse = np.sqrt(mean_squared_error(y_test, y_pred))
             rmses.append(rmse)
         cv_rmse = float(np.mean(rmses))
 
@@ -517,16 +575,36 @@ async def analyze_ticker_inner(ticker: str, session: aiohttp.ClientSession) -> O
 # ============================== #
 #            Scanner             #
 # ============================== #
-async def scan_stocks() -> List[Dict[str, Any]]:
+async def scan_stocks(manual_mode: bool = False) -> List[Dict[str, Any]]:
     try:
         results: List[Dict[str, Any]] = []
-        tickers = await fetch_tickers()
+        
+        # Choose ticker source based on mode
+        if manual_mode:
+            try:
+                tickers = get_manual_tickers()
+                logging.info(f"Using MANUAL mode with {len(tickers)} tickers: {tickers}")
+            except (FileNotFoundError, ValueError) as e:
+                await send_telegram(f"❌ שגיאה: {str(e)}")
+                return []
+        else:
+            tickers = await fetch_tickers()
+            logging.info(f"Using AUTO mode with {len(tickers)} tickers: {tickers}")
+            
         if not tickers:
             await send_telegram("⚠️ שגיאה: לא נמצאו טיקרים מתאימים")
             return []
 
         logging.info(f"Starting analysis of {len(tickers)} tickers")
-        tasks = [analyze_ticker(t) for t in tickers]
+        
+        # Use semaphore to limit concurrent requests
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+        
+        async def analyze_with_semaphore(ticker):
+            async with semaphore:
+                return await analyze_ticker(ticker)
+        
+        tasks = [analyze_with_semaphore(t) for t in tickers]
         analyses = await asyncio.gather(*tasks, return_exceptions=True)
 
         for i, analysis in enumerate(analyses):
@@ -568,7 +646,8 @@ async def scan_stocks() -> List[Dict[str, Any]]:
                 conn.commit()
 
             # Telegram message
-            msg_lines = [f"📊 נמצאו {len(results)} מניות מבטיחות:"]
+            mode_str = "ידני" if manual_mode else "אוטומטי"
+            msg_lines = [f"📊 נמצאו {len(results)} מניות מבטיחות (מצב {mode_str}):"]
             for row in results:
                 msg_lines.append(
                     (f"\nמניה: {row['ticker']}\n"
@@ -580,7 +659,8 @@ async def scan_stocks() -> List[Dict[str, Any]]:
                 )
             await send_telegram("\n".join(msg_lines))
         else:
-            await send_telegram("😕 לא נמצאו מניות עם פוטנציאל רווח מעל הסף")
+            mode_str = "ידני" if manual_mode else "אוטומטי"
+            await send_telegram(f"😕 לא נמצאו מניות עם פוטנציאל רווח מעל הסף (מצב {mode_str})")
         return results
 
     except Exception as e:
@@ -591,5 +671,11 @@ async def scan_stocks() -> List[Dict[str, Any]]:
 #           Entry Point          #
 # ============================== #
 if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Stock Analysis Bot')
+    parser.add_argument('--manual', action='store_true', help='Use manual tickers from manual_tickers.txt file')
+    args = parser.parse_args()
+    
     init_db()
-    asyncio.run(scan_stocks())
+    asyncio.run(scan_stocks(manual_mode=args.manual))
